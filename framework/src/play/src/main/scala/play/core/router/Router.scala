@@ -68,12 +68,12 @@ object Router {
     trait ParamsExtractor {
       def unapply(request: RequestHeader): Option[RouteParams]
     }
-    def apply(method: String, pathPattern: PathPattern) = new ParamsExtractor {
+    def apply(method: String, pathPattern: PathPattern, domainPattern: PathPattern, forceHTTPS: Boolean) = new ParamsExtractor {
 
       def unapply(request: RequestHeader): Option[RouteParams] = {
-        if (method == request.method) {
+        if (method == request.method && (!forceHTTPS || request.secured)) {
           pathPattern(request.path).map { groups =>
-            RouteParams(groups, request.queryString)
+            RouteParams(domainPattern(request.domain).getOrElse(Map()), groups, request.queryString)
           }
         } else {
           None
@@ -100,23 +100,29 @@ object Router {
 
   case class Param[T](name: String, value: Either[String, T])
 
-  case class RouteParams(path: Map[String, String], queryString: Map[String, Seq[String]]) {
+  case class RouteParams(domain: Map[String, String], path: Map[String, String], queryString: Map[String, Seq[String]]) {
+
+    def fromDomain[T](key: String, default: Option[T] = None)(implicit binder: PathBindable[T]): Param[T] = {
+      Param(key, domain.get(key).map(binder.bind(key, _)).getOrElse {
+        default.map(d => Right(d)).getOrElse(Left("Missing domain parameter: " + key))
+      })
+    }
 
     def fromPath[T](key: String, default: Option[T] = None)(implicit binder: PathBindable[T]): Param[T] = {
       Param(key, path.get(key).map(binder.bind(key, _)).getOrElse {
-        default.map(d => Right(d)).getOrElse(Left("Missing parameter: " + key))
+        default.map(d => Right(d)).getOrElse(Left("Missing path parameter: " + key))
       })
     }
 
     def fromQuery[T](key: String, default: Option[T] = None)(implicit binder: QueryStringBindable[T]): Param[T] = {
       Param(key, binder.bind(key, queryString).getOrElse {
-        default.map(d => Right(d)).getOrElse(Left("Missing parameter: " + key))
+        default.map(d => Right(d)).getOrElse(Left("Missing query parameter: " + key))
       })
     }
 
   }
 
-  case class HandlerDef(ref: AnyRef, controller: String, method: String, parameterTypes: Seq[Class[_]], verb: String, comments: String, path: String)
+  case class HandlerDef(ref: AnyRef, controller: String, method: String, parameterTypes: Seq[Class[_]], verb: String, comments: String, path: String, subdomain: String, forceHTTPS: Boolean)
 
   def queryString(items: List[Option[String]]) = {
     Option(items.filter(_.isDefined).map(_.get).filterNot(_.isEmpty)).filterNot(_.isEmpty).map("?" + _.mkString("&")).getOrElse("")

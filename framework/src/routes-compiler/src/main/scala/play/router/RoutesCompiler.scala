@@ -37,10 +37,13 @@ object RoutesCompiler {
 
   sealed trait Rule extends Positional
 
-  case class Route(verb: HttpVerb, path: PathPattern, call: HandlerCall, comments: List[Comment] = List()) extends Rule
+  case class Route(verb: HttpVerb, path: PathPattern, call: HandlerCall, comments: List[Comment] = List(), secured: Boolean = false, subdomain: Subdomain = Subdomain()) extends Rule
   case class Include(prefix: String, router: String) extends Rule
 
   case class Comment(comment: String)
+  case class Subdomain(value: PathPattern = PathPattern(Seq(DynamicPart("subdomain", ".+")))) {
+    override def toString = value.toString
+  }
 
 
   object Hash {
@@ -169,6 +172,16 @@ object RoutesCompiler {
       case _ ~ parts => PathPattern(parts)
     }
 
+    def singleComponentDomainPart: Parser[DynamicPart] = (":" ~> identifier) ^^ {
+      case name => DynamicPart(name, """[^\]/]+""")
+    }
+    def staticDomainPart: Parser[StaticPart] = (not(":") ~> not("*") ~> not("$") ~> not("]") ~> """[^\s]""".r +) ^^ {
+      case chars => StaticPart(chars.mkString)
+    }
+    def domain: Parser[PathPattern] = ((positioned(singleComponentDomainPart) | positioned(multipleComponentsPathPart) | positioned(regexComponentPathPart) | staticDomainPart) *) ^^ {
+      case parts => PathPattern(parts)
+    }
+
     def parameterType: Parser[String] = ":" ~> ignoreWhiteSpace ~> rep1sep(identifier, ".") ~ opt(brackets) ^^ {
       case t ~ g => t.mkString(".") + g.getOrElse("")
     }
@@ -217,23 +230,32 @@ object RoutesCompiler {
       case v ~ _ ~ p ~ _ ~ c ~ _ => Route(v, p, c)
     }
 
+    def securedroute = "S" ~ route ^^ {
+      case _ ~ r => r.copy(secured = true).setPos(r.pos)
+    }
+
     def include = "->" ~! separator ~ path ~ separator ~ router ~ ignoreWhiteSpace ^^ {
       case _ ~ _ ~ p ~ _ ~ r ~ _ => Include(p.toString, r)
     }
 
-    def sentence: Parser[Product with Serializable] = namedError((comment | positioned(include) | positioned(route)), "HTTP Verb (GET, POST, ...), include (->) or comment (#) expected") <~ (newLine | EOF)
+    def subdomain = "[" ~ domain ~ "]" ~ ignoreWhiteSpace ^^ {
+      case _ ~ s ~ _ ~ _ => Subdomain(s)
+    }
+
+    def sentence: Parser[Product with Serializable] = namedError((comment | subdomain | positioned(include) | positioned(securedroute) | positioned(route)), "HTTP Verb ((S)GET, (S)POST, ...), include (->), domain ([...]) or comment (#) expected") <~ (newLine | EOF)
 
     def parser: Parser[List[Rule]] = phrase((blankLine | sentence *) <~ end) ^^ {
       case routes => 
-        routes.reverse.foldLeft(List[(Option[Rule],List[Comment])]()) {
-          case (s,r@Route(_,_,_,_)) => (Some(r),List()) :: s
-          case (s,i@Include(_,_)) => (Some(i),List()) :: s
-          case ( s, c@()) => (None, List()) :: s
-          case ( (r,comments) :: others, c@Comment(_)) => (r, c:: comments) :: others
+        routes.reverse.foldLeft(List[(Option[Subdomain],Option[Rule],List[Comment])]()) {
+          case (s,r@Route(_,_,_,_,_,_)) => (None,Some(r),List()) :: s
+          case (s,i@Include(_,_)) => (None,Some(i),List()) :: s
+          case ( s, c@()) => (None, None, List()) :: s
+          case ( (d,r,comments) :: others, c@Comment(_)) => (d, r, c:: comments) :: others
+          case ( (domain,r,c) :: others, d@Subdomain(_)) => (Some(d), r, c) :: others
           case (s,_) => s
         }.collect {
-          case (Some(r@Route(_,_,_,_)), comments) => r.copy(comments = comments).setPos(r.pos)
-          case (Some(i@Include(_,_)),_) => i
+          case (domain, Some(r@Route(_,_,_,_,_,_)), comments) => r.copy(comments = comments, subdomain = domain.getOrElse(Subdomain())).setPos(r.pos)
+          case (d, Some(i@Include(_,_)),_) => i
         }
     }
 
@@ -739,7 +761,7 @@ object RoutesCompiler {
                     """
                           |%s
                           |def %s(%s): play.api.mvc.HandlerRef[_] = new play.api.mvc.HandlerRef(
-                          |   %s, HandlerDef(this, "%s", "%s", %s, "%s", %s, _prefix + %s)
+                          |   %s, HandlerDef(this, "%s", "%s", %s, "%s", %s, _prefix + %s, %s, %s)
                           |)
                       """.stripMargin.format(
                       markLines(route),
@@ -751,7 +773,9 @@ object RoutesCompiler {
                       "Seq(" + { parameters.map("classOf[" + _.typeName + "]").mkString(", ") } + ")",
                       route.verb,
                       "\"\"\""+route.comments.map(_.comment).mkString("\n")+"\"\"\"",
-                      "\"\"\""+route.path+"\"\"\""
+                      "\"\"\""+route.path+"\"\"\"",
+                      "\"\"\""+route.subdomain+"\"\"\"",
+                      route.secured
                       )
 
                 }.mkString("\n")
@@ -923,16 +947,18 @@ object RoutesCompiler {
    */
   def routeDefinitions(rules: List[Rule]): String = {
     rules.zipWithIndex.map {
-      case (r @ Route(_, _, _, _), i) =>
+      case (r @ Route(_, _, _, _, _, _), i) =>
         """
           |%s
-          |private[this] lazy val %s%s = Route("%s", %s)
+          |private[this] lazy val %s%s = Route("%s", %s, %s, %s)
         """.stripMargin.format(
           markLines(r),
           r.call.packageName.replace(".", "_") + "_" + r.call.controller.replace(".", "_") + "_" + r.call.method,
           i,
           r.verb.value,
-          "PathPattern(List(StaticPart(Routes.prefix)" + { if (r.path.parts.isEmpty) "" else """,StaticPart(Routes.defaultPrefix),""" } + r.path.parts.map(_.toString).mkString(",") + "))")
+          "PathPattern(List(StaticPart(Routes.prefix)" + { if (r.path.parts.isEmpty) "" else """,StaticPart(Routes.defaultPrefix),""" } + r.path.parts.map(_.toString).mkString(",") + "))",
+          "PathPattern(List(StaticPart(\"\")," + r.subdomain.value.parts.map(_.toString).mkString(",") + "))",
+          r.secured)
       case (r @ Include(_, _), i) =>
         """
           |%s
@@ -951,8 +977,8 @@ object RoutesCompiler {
          |}}
       """.stripMargin.format(
         rules.map {
-          case Route(verb, path, call, _) if path.parts.isEmpty => "(\"\"\"" + verb + "\"\"\", prefix,\"\"\"" + call + "\"\"\")"
-          case Route(verb, path, call, _) => "(\"\"\"" + verb + "\"\"\", prefix + (if(prefix.endsWith(\"/\")) \"\" else \"/\") + \"\"\"" + path + "\"\"\",\"\"\"" + call + "\"\"\")"
+          case Route(verb, path, call, _, _, _) if path.parts.isEmpty => "(\"\"\"" + verb + "\"\"\", prefix,\"\"\"" + call + "\"\"\")"
+          case Route(verb, path, call, _, _, _) => "(\"\"\"" + verb + "\"\"\", prefix + (if(prefix.endsWith(\"/\")) \"\" else \"/\") + \"\"\"" + path + "\"\"\",\"\"\"" + call + "\"\"\")"
           case Include(prefix, router) => router + ".documentation"
         }.mkString(","))
   }
@@ -976,7 +1002,7 @@ object RoutesCompiler {
           r.router.replace(".", "_"),
           i
         )
-      case (r @ Route(_, _, _, _), i) =>
+      case (r @ Route(_, _, _, _, _, _), i) =>
         """
             |%s
             |case %s%s(params) => {
@@ -997,7 +1023,8 @@ object RoutesCompiler {
               p.fixed.map { v =>
                 """Param[""" + p.typeName + """]("""" + p.name + """", Right(""" + v + """))"""
               }.getOrElse {
-                """params.""" + (if (r.path.has(p.name)) "fromPath" else "fromQuery") + """[""" + p.typeName + """]("""" + p.name + """", """ + p.default.map("Some(" + _ + ")").getOrElse("None") + """)"""
+                val fromWhere = if (r.subdomain.value.has(p.name)) "fromDomain" else if (r.path.has(p.name)) "fromPath" else "fromQuery"
+                """params.""" + fromWhere + """[""" + p.typeName + """]("""" + p.name + """", """ + p.default.map("Some(" + _ + ")").getOrElse("None") + """)"""
               }
             }.mkString(", ")
           }.map("(" + _ + ")").getOrElse(""),
@@ -1022,7 +1049,7 @@ object RoutesCompiler {
           // definition
           """HandlerDef(this, """" + r.call.packageName + "." + r.call.controller + """", """" + r.call.method + """", """ + r.call.parameters.filterNot(_.isEmpty).map { params =>
             params.map("classOf[" + _.typeName + "]").mkString(", ")
-          }.map("Seq(" + _ + ")").getOrElse("Nil") + ""","""" + r.verb + """", """ +"\"\"\""+ r.comments.map(_.comment).mkString("\n")+"\"\"\", Routes.prefix + \"\"\"" + r.path + "\"\"\")")
+          }.map("Seq(" + _ + ")").getOrElse("Nil") + ""","""" + r.verb + """", """ +"\"\"\""+ r.comments.map(_.comment).mkString("\n")+"\"\"\", Routes.prefix + \"\"\"" + r.path + "\"\"\", \"\"\"" + r.subdomain + "\"\"\", " + r.secured + ")")
     }.mkString("\n")).filterNot(_.isEmpty).getOrElse {
 
       """Map.empty""" // Empty partial function

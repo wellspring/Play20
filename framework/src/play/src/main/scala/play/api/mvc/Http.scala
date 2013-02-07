@@ -82,6 +82,11 @@ import scala.util.control.NonFatal
     lazy val domain: String = host.split(':').head
 
     /**
+     * Is the connection secured by HTTPS? Extract the protocol from header info forwarded from Heroku.
+     */
+    lazy val secured: Boolean = headers.get("x-forwarded-proto") == Some("https")
+
+    /**
      * The Request Langs extracted from the Accept-Language header and sorted by preference (preferred first).
      */
     lazy val acceptLanguages: Seq[play.api.i18n.Lang] = {
