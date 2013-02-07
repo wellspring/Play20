@@ -71,12 +71,15 @@ object Router {
     def apply(method: String, pathPattern: PathPattern, domainPattern: PathPattern, forceHTTPS: Boolean) = new ParamsExtractor {
 
       def unapply(request: RequestHeader): Option[RouteParams] = {
-        if (method == request.method && (!forceHTTPS || request.secured)) {
-          pathPattern(request.path).map { groups =>
-            RouteParams(domainPattern(request.domain).getOrElse(Map()), groups, request.queryString)
+        domainPattern(request.domain) match {
+          case None => None // The vhost doesnt match
+          case x if (method != request.method) => None // The method doesnt match
+          case x if (forceHTTPS && !request.secured) => None // The protocol doesnt match
+          case Some(domain) => {
+            pathPattern(request.path).map { groups =>
+              RouteParams(domain, groups, request.queryString)
+            }
           }
-        } else {
-          None
         }
       }
 
