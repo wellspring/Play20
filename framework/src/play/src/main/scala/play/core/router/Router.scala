@@ -175,9 +175,11 @@ object Router {
 
     def routes: PartialFunction[RequestHeader, Handler]
 
-    def setPrefix(prefix: String)
+    def setPrefix(prefix: String, domain: String=":subdomain")
 
     def prefix: String
+
+    def domain: String
 
     //
 
