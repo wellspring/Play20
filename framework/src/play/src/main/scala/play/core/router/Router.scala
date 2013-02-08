@@ -71,12 +71,19 @@ object Router {
     def apply(method: String, pathPattern: PathPattern, domainPattern: PathPattern, forceHTTPS: Boolean) = new ParamsExtractor {
 
       def unapply(request: RequestHeader): Option[RouteParams] = {
+        /*play.api.Logger.info("""[ROUTE] http://""" + request.domain + ":9000" + request.uri + """ ...
+                     [ROUTE CHECK] Same method?  """ + (method == request.method).toString + "   (" + method + """)
+                     [ROUTE CHECK] Secure check? """ + (!forceHTTPS || request.secured).toString + "   (" + (if(forceHTTPS) "" else "not") + """ forced)
+                     [ROUTE CHECK] Same domain?  """ + domainPattern(request.domain).isDefined.toString + "   (" + domainPattern + """)
+                     [ROUTE CHECK] Same path?    """ + pathPattern(request.path).isDefined.toString + "   (" + pathPattern + ")")*/
+
         domainPattern(request.domain) match {
           case None => None // The vhost doesnt match
           case x if (method != request.method) => None // The method doesnt match
           case x if (forceHTTPS && !request.secured) => None // The protocol doesnt match
           case Some(domain) => {
             pathPattern(request.path).map { groups =>
+              //play.api.Logger.info("OK.")
               RouteParams(domain, groups, request.queryString)
             }
           }
@@ -175,11 +182,11 @@ object Router {
 
     def routes: PartialFunction[RequestHeader, Handler]
 
-    def setPrefix(prefix: String, domain: String=":subdomain")
+    def setPrefix(prefix: String, domain: PathPattern = PathPattern(Seq(DynamicPart("subdomain", ".+"))))
 
     def prefix: String
 
-    def domain: String
+    def domain: PathPattern
 
     //
 

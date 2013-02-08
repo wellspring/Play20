@@ -37,12 +37,13 @@ object RoutesCompiler {
 
   sealed trait Rule extends Positional
 
-  case class Route(verb: HttpVerb, path: PathPattern, call: HandlerCall, comments: List[Comment] = List(), secured: Boolean = false, subdomain: Subdomain = Subdomain()) extends Rule
-  case class Include(prefix: String, router: String, subdomain: Subdomain = Subdomain()) extends Rule
+  case class Route(verb: HttpVerb, path: PathPattern, call: HandlerCall, comments: List[Comment] = List(), secured: Boolean = false, subdomain: Option[Subdomain] = None) extends Rule
+  case class Include(prefix: String, router: String, subdomain: Option[Subdomain] = None) extends Rule
 
   case class Comment(comment: String)
   case class Subdomain(value: PathPattern = PathPattern(Seq(DynamicPart("subdomain", ".+")))) {
     override def toString = value.toString
+    def toPatternString = "PathPattern(Seq(" + value.parts.map(_.toString).mkString(",") + "))"
   }
 
 
@@ -235,7 +236,7 @@ object RoutesCompiler {
     }
 
     def include = "->" ~! separator ~ path ~ separator ~ router ~ ignoreWhiteSpace ^^ {
-      case _ ~ _ ~ p ~ _ ~ r ~ _ => Include(p.toString, r, Subdomain())
+      case _ ~ _ ~ p ~ _ ~ r ~ _ => Include(p.toString, r, None)
     }
 
     def subdomain = "[" ~ domain ~ "]" ~ ignoreWhiteSpace ^^ {
@@ -254,8 +255,8 @@ object RoutesCompiler {
           case ( (domain,r,c) :: others, d@Subdomain(_)) => (Some(d), r, c) :: others
           case (s,_) => s
         }.collect {
-          case (domain, Some(r@Route(_,_,_,_,_,_)), comments) => r.copy(comments = comments, subdomain = domain.getOrElse(Subdomain())).setPos(r.pos)
-          case (domain, Some(i@Include(_,_,_)),_) => i.copy(subdomain = domain.getOrElse(Subdomain())).setPos(i.pos)
+          case (domain, Some(r@Route(_,_,_,_,_,_)), comments) => r.copy(comments = comments, subdomain = domain).setPos(r.pos)
+          case (domain, Some(i@Include(_,_,_)),_) => i.copy(subdomain = domain).setPos(i.pos)
         }
     }
 
@@ -465,12 +466,12 @@ object RoutesCompiler {
             |object Routes extends Router.Routes {
             |
             |private var _prefix = "/"
-            |private var _domain = "%s"
+            |private var _domain = %s
             |
-            |def setPrefix(prefix: String, domain: String = "%s") {
+            |def setPrefix(prefix: String, domain: PathPattern) {
             |  _prefix = prefix
             |  _domain = domain
-            |  List[(String,Routes,String)](%s).foreach {
+            |  List[(String,Routes,PathPattern)](%s).foreach {
             |    case (p, router, d) => router.setPrefix(prefix + (if(prefix.endsWith("/")) "" else "/") + p, d)
             |  }
             |}
@@ -493,9 +494,8 @@ object RoutesCompiler {
           date,
           namespace.map("package " + _).getOrElse(""),
           additionalImports.map("import " + _).mkString("\n"),
-          Subdomain(),
-          Subdomain(),
-          rules.collect { case Include(p, r, d) => "(\"" + p + "\"," + r + ",\"" + d + "\")" }.mkString(","),
+          Subdomain().toPatternString,
+          rules.collect { case Include(p, r, d) => "(\"" + p + "\"," + r + "," + d.map(_.toPatternString).getOrElse("domain") + ")" }.mkString(","),
           routeDefinitions(rules),
           routing(rules)
         )
@@ -779,7 +779,7 @@ object RoutesCompiler {
                       route.verb,
                       "\"\"\""+route.comments.map(_.comment).mkString("\n")+"\"\"\"",
                       "\"\"\""+route.path+"\"\"\"",
-                      "\"\"\""+route.subdomain+"\"\"\"",
+                      "\"\"\""+route.subdomain.getOrElse(Subdomain())+"\"\"\"",
                       route.secured
                       )
 
@@ -962,7 +962,7 @@ object RoutesCompiler {
           i,
           r.verb.value,
           "PathPattern(List(StaticPart(Routes.prefix)" + { if (r.path.parts.isEmpty) "" else """,StaticPart(Routes.defaultPrefix),""" } + r.path.parts.map(_.toString).mkString(",") + "))",
-          "PathPattern(List(StaticPart(\"\")," + r.subdomain.value.parts.map(_.toString).mkString(",") + "))",
+          r.subdomain.map(_.toPatternString).getOrElse("domain"),
           r.secured)
       case (r @ Include(_, _, _), i) =>
         """
@@ -1028,7 +1028,7 @@ object RoutesCompiler {
               p.fixed.map { v =>
                 """Param[""" + p.typeName + """]("""" + p.name + """", Right(""" + v + """))"""
               }.getOrElse {
-                val fromWhere = if (r.subdomain.value.has(p.name)) "fromDomain" else if (r.path.has(p.name)) "fromPath" else "fromQuery"
+                val fromWhere = if (r.subdomain.map(_.value.has(p.name)).getOrElse(false)) "fromDomain" else if (r.path.has(p.name)) "fromPath" else "fromQuery"
                 """params.""" + fromWhere + """[""" + p.typeName + """]("""" + p.name + """", """ + p.default.map("Some(" + _ + ")").getOrElse("None") + """)"""
               }
             }.mkString(", ")
@@ -1054,7 +1054,7 @@ object RoutesCompiler {
           // definition
           """HandlerDef(this, """" + r.call.packageName + "." + r.call.controller + """", """" + r.call.method + """", """ + r.call.parameters.filterNot(_.isEmpty).map { params =>
             params.map("classOf[" + _.typeName + "]").mkString(", ")
-          }.map("Seq(" + _ + ")").getOrElse("Nil") + ""","""" + r.verb + """", """ +"\"\"\""+ r.comments.map(_.comment).mkString("\n")+"\"\"\", Routes.prefix + \"\"\"" + r.path + "\"\"\", \"\"\"" + r.subdomain + "\"\"\", " + r.secured + ")")
+          }.map("Seq(" + _ + ")").getOrElse("Nil") + ""","""" + r.verb + """", """ +"\"\"\""+ r.comments.map(_.comment).mkString("\n")+"\"\"\", Routes.prefix + \"\"\"" + r.path + "\"\"\", \"\"\"" + r.subdomain.getOrElse(Subdomain()) + "\"\"\", " + r.secured + ")")
     }.mkString("\n")).filterNot(_.isEmpty).getOrElse {
 
       """Map.empty""" // Empty partial function
