@@ -724,7 +724,7 @@ object RoutesCompiler {
       case (packageName, routes) =>
         val p = ".*controllers\\.?".r.replaceAllIn(packageName, "")
         "package %s {\n%s\n}".stripMargin.format(
-          if(p.isEmpty) "routes" else "routes." + p,
+          if(p.isEmpty) "R" else "R." + p,
           routes.groupBy(_.call.controller).map {
             case (controller, routes) =>
               val c = controller.replace('.', '_')
