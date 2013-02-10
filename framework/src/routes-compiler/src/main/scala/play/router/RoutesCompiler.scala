@@ -437,6 +437,8 @@ object RoutesCompiler {
           |%s
           |
           |%s
+          |
+          |%s
       """.stripMargin.format(
         path,
         hash,
@@ -445,7 +447,8 @@ object RoutesCompiler {
         additionalImports.map("import " + _).mkString("\n"),
         reverseRouting(routes),
         javaScriptReverseRouting(routes),
-        refReverseRouting(routes)
+        refReverseRouting(routes),
+        accessibleRoute(namespace, routes)
       )
     ),
       (filePrefix + "_routing.scala",
@@ -711,6 +714,24 @@ object RoutesCompiler {
       }
     }.mkString("\n")
 
+  }
+
+  /**
+   * Fix the non-accessible routes bug (I am alone to have this shit issue with subprojects?)
+   */
+  def accessibleRoute(namespace: Option[String], routes: List[Route]): String = {
+    routes.groupBy(_.call.packageName).map {
+      case (packageName, routes) =>
+        val p = ".*controllers\\.?".r.replaceAllIn(packageName, "")
+        "package %s {\n%s\n}".stripMargin.format(
+          if(p.isEmpty) "routes" else "routes." + p,
+          routes.groupBy(_.call.controller).map {
+            case (controller, routes) =>
+              val c = controller.replace('.', '_')
+              """  object %s { lazy val x = new %s.Reverse%s; def apply() = x }""".stripMargin.format(c, packageName, c)
+          }.mkString("\n")
+        )
+    }.mkString("\n")
   }
 
   /**
